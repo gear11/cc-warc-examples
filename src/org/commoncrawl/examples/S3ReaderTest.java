@@ -16,7 +16,7 @@ import org.jets3t.service.model.S3Object;
  * @author Stephen Merity (Smerity)
  */
 public class S3ReaderTest {
-	public static void main(String[] args) throws IOException, S3ServiceException {
+	public static void main(String[] args) throws Exception {
 		// We're accessing a publicly available bucket so don't need to fill in our credentials
 		S3Service s3s = new RestS3Service(null);
 		
