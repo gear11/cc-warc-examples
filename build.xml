@@ -11,9 +11,7 @@
     <target name="compile" depends="init">
         <javac srcdir="${src}" destdir="${build}" includeantruntime="false" deprecation="on">
         <classpath>
-            <fileset dir="lib_skinny" includes="*.jar" >
-                <exclude name="webarchive-commons-jar-with-dependencies.jar" />
-            </fileset>
+            <fileset dir="lib_skinny" includes="*.jar" />
         </classpath>
         </javac>
     </target>
