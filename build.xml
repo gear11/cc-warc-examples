@@ -1,0 +1,36 @@
+<project name="g11-cc-warc-examples" default="dist" basedir="." >
+    <property name="src" location="src"/>
+    <property name="build" location="build"/>
+    <property name="dist"  location="dist"/>
+
+    <target name="init">
+        <mkdir dir="${build}"/>
+        <mkdir dir="${dist}"/>
+    </target>
+
+    <target name="compile" depends="init">
+        <javac srcdir="${src}" destdir="${build}" includeantruntime="false" deprecation="on">
+        <classpath>
+            <fileset dir="lib_skinny" includes="*.jar" >
+                <exclude name="webarchive-commons-jar-with-dependencies.jar" />
+            </fileset>
+        </classpath>
+        </javac>
+    </target>
+
+    <target name="dist" depends="compile" >
+        <jar destfile="${dist}/g11-cc-warc-examples-skinny.jar" >
+            <zipfileset src="lib_skinny/webarchive-commons-1.1.2.jar" />
+            <zipfileset src="lib_skinny/fastutil-6.5.15.jar" includes="it/unimi/dsi/fastutil/io/**/*.class"/>
+            <fileset dir="${build}" />
+            <manifest>
+                <attribute name="Main-Class" value="com.gear11.warc.GeoRSSCounter"/>
+            </manifest>
+        </jar>
+    </target>
+
+    <target name="clean">
+        <delete dir="${build}"/>
+        <delete dir="${dist}"/>
+    </target>
+</project>

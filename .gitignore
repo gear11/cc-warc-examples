@@ -2,3 +2,7 @@
 
 data/
 bin/
+.idea/
+dist/
+cc-warc-examples.iml
+target/
