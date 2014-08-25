@@ -18,7 +18,12 @@ public class WARCDocReaderTest {
 
 	public static void main(String[] args) throws IOException, XMLStreamException {
 		// Set up a local compressed WARC file for reading 
-		String fn = "data/CC-MAIN-20131204131715-00000-ip-10-33-133-15.ec2.internal.warc.gz";
+		String fn;
+        if (args.length > 0) {
+            fn = args[0];
+        } else {
+            fn = "data/CC-MAIN-20131204131715-00000-ip-10-33-133-15.ec2.internal.warc.gz";
+        }
 		FileInputStream is = new FileInputStream(fn);
 		// The file name identifies the ArchiveReader and indicates if it should be decompressed
 		ArchiveReader ar = WARCReaderFactory.get(fn, is, true);
