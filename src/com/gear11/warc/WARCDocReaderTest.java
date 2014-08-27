@@ -6,7 +6,6 @@ import javax.xml.stream.XMLStreamException;
 import org.archive.io.ArchiveReader;
 import org.archive.io.ArchiveRecord;
 import org.archive.io.warc.WARCReaderFactory;
-import com.gear11.warc.WARCDoc;
 
 /**
  * An example of processing a WARC file to discover GeoRSS, based on
@@ -35,7 +34,10 @@ public class WARCDocReaderTest {
             if ("response".equals(r.getHeader().getHeaderValue("WARC-Type"))) {
                 WARCDoc doc = new WARCDoc(r);
                 if (doc.isGeoRss()) {
-                    System.out.println(r.getHeader().getUrl()+","+doc.countGeoTags());
+                    System.out.println(r.getHeader().getUrl()
+                        +'\t'+doc.getUpdatedAt()
+                        +'\t'+doc.countGeoTags()
+                        +'\t'+doc.countLocations());
                 }
             }
 		}

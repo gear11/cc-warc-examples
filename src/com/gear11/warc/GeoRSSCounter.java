@@ -3,15 +3,15 @@ package com.gear11.warc;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.io.LongWritable;
+import org.apache.hadoop.io.ArrayPrimitiveWritable;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.io.WritableComparable;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.mapreduce.Mapper;
+import org.apache.hadoop.mapreduce.Reducer;
 import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
 import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
-import org.apache.hadoop.mapreduce.lib.reduce.LongSumReducer;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
 import org.apache.log4j.BasicConfigurator;
@@ -36,11 +36,16 @@ public class GeoRSSCounter extends Configured implements Tool {
 	}
 
     /**
-     * Scans the input archives for documents that are geo-enabled RSS feeds, with an indicator
-     * of how many actual location entries were found.
+     * Scans the input archives for documents that are geo-enabled RSS feeds.  For each, outputs
+     * URL as key, and an array of longs as the value:
+     * 0: Updated time in seconds since epoch
+     * 1: Number of geotagged items
+     * 2: Number of distinct locations
      */
-	protected static class GeoRSSCounterMapper extends Mapper<Text, ArchiveReader, Text, LongWritable> {
-		private Text outKey = new Text();
+	protected static class GeoRSSCounterMapper extends Mapper<Text, ArchiveReader, Text, ArrayPrimitiveWritable> {
+		private final Text outKey = new Text();
+        private final long[] vals = new long[3];
+        private final ArrayPrimitiveWritable result = new ArrayPrimitiveWritable(vals);
 
 		@Override
 		public void map(Text key, ArchiveReader value, Context context) throws IOException {
@@ -56,7 +61,12 @@ public class GeoRSSCounter extends Configured implements Tool {
                             if (doc.isGeoRss()) {
                                 context.getCounter(MAPPERCOUNTER.GEO_RSS_IN).increment(1);
                                 outKey.set(r.getHeader().getUrl());
-                                context.write(outKey, new LongWritable(doc.countGeoTags()));
+                                vals[0] = doc.getUpdatedAt();
+                                vals[1] = doc.countGeoTags();
+                                vals[2] = doc.countLocations();
+                                //LOG.info("Writing "+outKey+"\t"+vals[0]+"\t"+vals[1]+"\t"+vals[2]);
+                                result.set(vals);
+                                context.write(outKey, result);
                             }
                         }
 					}
@@ -70,11 +80,46 @@ public class GeoRSSCounter extends Configured implements Tool {
 	}
 
     /**
+     * Reduces from an array of longs to an array of sums of those longs, formatted as a tab-delimited string.
+     */
+    public static class ArrayLongSumReducer extends Reducer<Text, ArrayPrimitiveWritable, Text, Text> {
+        private Text result = new Text();
+        StringBuilder sb = new StringBuilder();
+
+        @Override
+        public void reduce(Text key, Iterable<ArrayPrimitiveWritable> values,
+                           Context context) throws IOException, InterruptedException {
+            long[] sums = null;
+            for (ArrayPrimitiveWritable val : values) {
+                long[] vals = (long[]) val.get();
+                //LOG.info("Reducing "+key+"\t"+vals[0]+"\t"+vals[1]+"\t"+vals[2]);
+                if (sums == null) {
+                    sums = vals;
+                } else {
+                    for (int i = 0; i < sums.length && i < vals.length; ++i) {
+                        sums[i] = sums[i] + vals[i];
+                    }
+                }
+            }
+            if (sums == null) {
+                return;
+            }
+            sb.setLength(0);
+            for (long l: sums) {
+                sb.append(l).append('\t');
+            }
+            sb.setLength(sb.length() - 1);
+            result.set(sb.toString());
+            context.write(key, result);
+        }
+    }
+
+    /**
      * Compares output key Text objects, first by length (shortest first), then
      * by default String compareTo.  Used for the Map-Reduce sort phase.
      */
     public static class ShortestTextComparator extends Text.Comparator {
-
+        @Override
         public int compare(byte[] b1, int i1, int l1, byte[] b2, int i2, int l2) {
             String s1, s2;
             try {
@@ -89,7 +134,7 @@ public class GeoRSSCounter extends Configured implements Tool {
             }
             return compareShortest(s1, s2);
         }
-
+        @Override
         public int compare(WritableComparable a, WritableComparable b) {
             String s1 = a.toString();
             String s2 = b.toString();
@@ -120,7 +165,6 @@ public class GeoRSSCounter extends Configured implements Tool {
      * @return	0 if the Hadoop job completes successfully and 1 otherwise.
      */
     public int run(String[] args) throws Exception {
-
         BasicConfigurator.configure();
         // Input path example:
         //    s3n://aws-publicdatasets/common-crawl/crawl-data/CC-MAIN-2014-23/segments/1405997884827.82/warc/CC-MAIN-20140722025804-00091-ip-10-33-131-23.ec2.internal.warc.gz
@@ -146,11 +190,11 @@ public class GeoRSSCounter extends Configured implements Tool {
         job.setOutputFormatClass(TextOutputFormat.class);
 
         job.setOutputKeyClass(Text.class);
-        job.setOutputValueClass(LongWritable.class);
+        job.setOutputValueClass(ArrayPrimitiveWritable.class);
 
         job.setMapperClass(GeoRSSCounterMapper.class);
         job.setSortComparatorClass(ShortestTextComparator.class);
-        job.setReducerClass(LongSumReducer.class);
+        job.setReducerClass(ArrayLongSumReducer.class);
 
         return job.waitForCompletion(true) ? 0 : -1;
     }
