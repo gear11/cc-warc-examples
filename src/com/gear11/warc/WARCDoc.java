@@ -3,7 +3,10 @@ package com.gear11.warc;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
 import java.util.Arrays;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -13,12 +16,18 @@ import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamException;
 import javax.xml.stream.XMLStreamReader;
 import org.archive.io.ArchiveRecord;
+import org.apache.log4j.Logger;
+
 
 /**
  * Wraps a WARC archive record to pull out information about the HTTP response/document.
  * TODO: Add support for wgs84_pos
  */
 public class WARCDoc {
+
+    protected static final Logger LOG = Logger.getLogger(WARCDoc.class);
+    protected static final XMLInputFactory factory = XMLInputFactory.newInstance();
+
     protected final int statusCode;
     protected final Map<String,String> headers = new HashMap<String,String>();
     protected String mimeType;
@@ -26,13 +35,27 @@ public class WARCDoc {
     protected BufferedReader reader;
     protected Set<String> namespaces;
     protected XMLStreamReader xmlStreamReader;
-    protected String geoRssNs;
+    //protected String geoRssNs;
+
+    // State captured during parse
+    protected boolean isParsed;
+    protected boolean _isGeoRSS;
+    protected int geoTagCount;
+    protected Set<Integer> locHashes = new HashSet<Integer>();
+    protected long mostRecentEpochSec = -1;
 
     // MIME types that mean the response is possibly an RSS feed.
     protected static final Set<String> FEED_MIME_TYPES = new HashSet<String>(Arrays.asList(
             "text/xml",
             "text/rss+xml",
             "application/rss+xml"
+    ));
+
+    // Elements that may contain dates
+    protected static final Set<String> DATE_ELS = new HashSet<String>(Arrays.asList(
+            "pubDate",
+            "updated",
+            "published"
     ));
 
     /**
@@ -127,7 +150,7 @@ public class WARCDoc {
     /**
      * Returns a reader for this document's content.
      */
-    protected BufferedReader getReader() {
+    public BufferedReader getReader() {
         if (xmlStreamReader != null) {
             throw new IllegalStateException("Already started XML parse");
         }
@@ -137,9 +160,8 @@ public class WARCDoc {
     /**
      * Returns an XML stream reader for this document's content.
      */
-    public XMLStreamReader getXMLStreamReader() throws XMLStreamException {
+    protected XMLStreamReader getXMLStreamReader() throws XMLStreamException {
         if (xmlStreamReader == null) {
-            XMLInputFactory factory = XMLInputFactory.newInstance();
             // Must prevent parser from attempting to validate external
             // DTDs or process may halt.
             factory.setProperty("javax.xml.stream.supportDTD", false);
@@ -152,10 +174,58 @@ public class WARCDoc {
      * Returns the number of Geo RSS tags discovered in the record.
      */
     public int countGeoTags() {
-        if (!isGeoRss()) {
-            return 0;
+        parseXml();
+        return this.geoTagCount;
+    }
+
+    /**
+     * Returns true iff this archive is an XML document with a GeoRSS namespace.
+     */
+    public boolean isGeoRss() {
+        parseXml();
+        return this._isGeoRSS;
+    }
+
+    /**
+     * Returns the number of distinct locations found
+     */
+    public int countLocations() {
+        parseXml();
+        return this.locHashes.size();
+    }
+
+    public long getUpdatedAt() {
+        parseXml();
+        return this.mostRecentEpochSec;
+    }
+
+    protected synchronized void parseXml() {
+        if (this.isParsed) {
+            return;
         }
-        int tags = 0;
+        this.isParsed = true;
+        // Nothing to parse from a non-feed
+        if (!this.isFeed()) {
+            return;
+        }
+        // Determine if this is GeoRSS
+        String geoRssNs = null;
+        try {
+            for (String ns : getNamespaces()) {
+                if (ns.indexOf("georss") > 0) {
+                    geoRssNs = ns;
+                    break;
+                }
+            }
+        } catch (XMLStreamException ex) {
+            // Ignore
+        }
+        this._isGeoRSS = geoRssNs != null;
+        // An optimization--we only care about GeoRSS feeds.  Remove if this changes.
+        if (!this._isGeoRSS) {
+            return;
+        }
+        // We have a GeoRSS feed.  Look for update time and locations
         try {
             XMLStreamReader reader = getXMLStreamReader();
             while (reader.hasNext()) {
@@ -164,39 +234,24 @@ public class WARCDoc {
                     case XMLStreamConstants.START_ELEMENT:
                         String ns = reader.getNamespaceURI();
                         if (geoRssNs.equals(ns)) {
-                            ++tags;
+                            String text = reader.getElementText();
+                            //LOG.info("GeoRSS string:  "+text);
+                            locHashes.add(text.hashCode());
+                            ++this.geoTagCount;
+                        }
+                        if (DATE_ELS.contains(reader.getLocalName())) {
+                            String text = reader.getElementText();
+                            //LOG.info("Date string:  "+text);
+                            long epochSec = DateHelper.toEpochSec(text);
+                            this.mostRecentEpochSec = Math.max(this.mostRecentEpochSec, epochSec);
                         }
                 }
             }
         } catch (XMLStreamException ex) {
             // Ignore
         }
-        return tags;
     }
 
-    /**
-     * Returns true iff this archive is an XML document with a GeoRSS namespace.
-     */
-    public boolean isGeoRss() {
-        if (geoRssNs != null) {
-            return true;
-        }
-        if (!isFeed()) {
-            return false;
-        }
-        try {
-            for (String ns : getNamespaces()) {
-                if (ns.indexOf("georss") > 0) {
-                    //System.out.println(ns);
-                    geoRssNs = ns;
-                    return true;
-                }
-            }
-        } catch (XMLStreamException ex) {
-            // Ignore
-        }
-        return false;
-    }
 
     /**
      * Parses this archive as XML, until the first element with
@@ -222,4 +277,94 @@ public class WARCDoc {
         return namespaces;
     }
 
+    public static class DateHelper {
+
+
+        // RSS:
+        // http://validator.w3.org/feed/docs/rss2.html
+        // <pubDate>Mon, 25 Aug 2014 07:07:58 +0000</pubDate>
+        //
+        // Atom:
+        // http://tools.ietf.org/html/rfc4287#page-10
+        /*
+        <updated>2003-12-13T18:30:02Z</updated>
+        <updated>2003-12-13T18:30:02.25Z</updated>
+        <updated>2003-12-13T18:30:02+01:00</updated>
+        <updated>2003-12-13T18:30:02.25+01:00</updated>
+        */
+        protected static final SimpleDateFormat RSS_FORMAT = new SimpleDateFormat("EEE, d MMM yyyy HH:mm:ss Z");
+        protected static final SimpleDateFormat ATOM_FORMAT = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssX");
+
+        /**
+         * Attempts to parse some of the various date formats encountered in RSS
+         * feeds and return a Unix seconds-since-epoch timestamp.
+         *
+         * Returns -1 if the date format was not understood.
+         */
+        public static long toEpochSec(String dateStr) {
+            // RSS:
+            // http://validator.w3.org/feed/docs/rss2.html
+            // Sat, 07 Sep 2002 0:00:01 GMT
+            // <pubDate>Mon, 25 Aug 2014 07:07:58 +0000</pubDate>
+            //
+            // Atom:
+            // http://tools.ietf.org/html/rfc4287#page-10
+            /*
+            <updated>2003-12-13T18:30:02Z</updated>
+            <updated>2003-12-13T18:30:02.25Z</updated>
+            <updated>2003-12-13T18:30:02+01:00</updated>
+            <updated>2003-12-13T18:30:02.25+01:00</updated>
+            */
+            // Invalid date
+            if (dateStr == null || dateStr.length() < 10) {
+                return -1;
+
+            // If length is 10, assume YYYY-MM-DD only and fix to midnight
+            } else if (dateStr.length() == 10) { // YYYY-MM-DD only
+                dateStr = dateStr.replace('/', '-');
+                dateStr += "T12:00:00";
+            }
+
+            // Atom format
+            if (dateStr.charAt(10) == 'T') {
+                // Throw out subseconds
+                int n = dateStr.indexOf('.');
+                if (n > 0) {
+                    // Find digits after '.'
+                    int m = n + 1;
+                    for ( ; m < dateStr.length(); ++m) {
+                        if (!Character.isDigit(dateStr.charAt(m))) {
+                            break;
+                        }
+                    }
+                    // Re-append from first non-digit after '.'
+                    if (m < dateStr.length()) {
+                        dateStr  = dateStr.substring(0, n) + dateStr.substring(m);
+                    } else {
+                        dateStr = dateStr.substring(0, n);
+                    }
+                }
+                // Not enough characters for time
+                if (dateStr.length() < 19) {
+                    return -1;
+                }
+                try {
+                    Date date = ATOM_FORMAT.parse(dateStr);
+                    return date.getTime() / 1000;
+                } catch (ParseException ex) {
+                    //LOG.warn("Parse exception on "+dateStr);
+                    return -1;
+                }
+            // RSS format
+            } else {
+                try {
+                    Date date = RSS_FORMAT.parse(dateStr);
+                    return date.getTime() / 1000;
+                } catch (ParseException ex) {
+                    //LOG.warn("Parse exception on "+dateStr);
+                    return -1;
+                }
+            }
+        }
+    }
 }
